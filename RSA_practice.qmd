@@ -1,0 +1,327 @@
+---
+title: "RSA_practice"
+author: "Nadu Barbashova"
+format: html
+editor: visual
+---
+
+## About: 
+
+This an R script to practice conducting representational similarity analysis on behavioral data. This script generates some simulated data as a way to practice.
+
+There are multiple aproaches to RSA. One can test a single model to see if the predicted similarity structure (in the model RDM) correlates with the observed similarity structure of the data (the behavioral RDM) significantly.
+
+One can compare multiple models by including them in a multiple regression to see which one best explains the behavioral data.
+
+# RSA with one model 
+
+## Load Packages: 
+
+```{r}
+
+library(pacman)
+p_load(tidyverse, tidyr, data.table, dplyr, ggplot2, lme4, lmerTest, Hmisc, Rmisc, psych, emmeans, pROC, statConfR, knitr, rstatix, effectsize, performance, broom.mixed, ggpubr)
+
+```
+
+## Simulate Behavioral Data 
+
+We’ll imagine three categories: **Fruits**, **Predators**, and **Tools**, each with distinct “average ratings” in **valence, arousal, and familiarity**.
+
+A **centroid** is just the *center point* (the mean) of a group of items when you’re working in more than one dimension:
+
+If you have 1 dimension (say just “valence”), the centroid of a category is simply the mean valence. If you have 2 dimensions (valence and arousal), the centroid is a point at (mean valence, mean arousal). If you have 3 dimensions (valence, arousal, familiarity), it’s a point at (mean valence, mean arousal, mean familiarity).
+
+In general, for *n* dimensions, the centroid is the average along each of those *n* axes.
+
+```{r}
+set.seed(123)
+
+# ── 1) Define categories and centroids ─────────────────────────────
+k_cat   <- 3
+n_stim  <- 30                  # total stimuli
+n_per_cat <- n_stim / k_cat    # 10 per category
+
+cats <- rep(c("Fruits","Predators","Tools"), each = n_per_cat)
+
+# Define prototypical centroids for each category:
+# Columns = Valence, Arousal, Familiarity
+cat_centroids <- matrix(c(
+  1.0,  0.3, 0.9,   # Fruits: positive, calm, most familiar
+ -0.8,  1.2, 0.5,   # Predators: negative, arousing, slightly familiar
+  0.0,  0.2, 0.7    # Tools: neutral, calm, moderately familiar
+), nrow = 3, byrow = TRUE)
+
+# create rownames and colnames. This way all the data in the matrix is numeric, now column contains character values 
+rownames(cat_centroids) <- c("Fruits","Predators","Tools")
+colnames(cat_centroids) <- c("Valence","Arousal","Familiarity")
+cat_centroids
+
+```
+
+```{r}
+
+# ── 2) Generate stimuli as noisy versions of category centroids ──
+dims <- c("Valence","Arousal","Familiarity")
+
+stim_means <- t(sapply(1:n_stim, function(i){
+  cid <- which(rownames(cat_centroids) == cats[i])
+  cat_centroids[cid,] + rnorm(length(dims), sd = 0.3)  # add noise
+}))
+
+rownames(stim_means) <- paste0("stim", 1:n_stim, "_", cats)
+colnames(stim_means) <- dims
+head(stim_means)
+
+```
+
+## Behavioral RDM 
+
+```{r}
+
+# ── 3) Behavioral RDM ────────────────────────────────────────────
+# Rhis function takes the existing matrix of data that shows the average valence, arousal and familiarity score of each  stimulus and then it creates pairwise correlations to see how similar each stimulus is, to each other stimulus 
+
+spearman_rdm <- function(data_matrix){
+  S <- cor(t(data_matrix), method = "spearman", use = "pairwise.complete.obs") # get a spearman correlation 
+  1 - S # subtract it from 1, this makes it a dissimilarity measure 
+}
+rdm_beh <- spearman_rdm(stim_means)
+
+# since we subtracted the correlation from 1, instead of the correlation rangin -1 to 1, it ranges from 0 to 2, with 2 being most dissimilar and 0 being most similar. 
+
+# ── 4) Model RDM (category-based) ─────────────────────────────────
+# Create a very simple model where each category is similar to itself and dissimilar to other categories 
+
+# cats contains the categories (Fruit, Predator, Tools)
+# Here we compare every element of cats with every other element of cats.
+# a != b → TRUE if categories differ, FALSE if same.
+# Convert TRUE to 1 (different category), FALSE to 0 (same category). 
+model_rdm <- outer(cats, cats, FUN = function(a,b) as.numeric(a != b))
+
+# check out first 5 rows of this matrix 
+head(model_rdm, 5)
+# no rownames  
+
+# give both RDMs the same rownames as stim_means 
+# right-to-left assignment.  
+rownames(model_rdm) <- colnames(model_rdm) <- rownames(stim_means)
+
+# ── 5) RSA correlation + permutation test ────────────────────────
+# create a function to take the lower triangle 
+# lower.tri is already a function that does this 
+lower_tri <- function(A) A[lower.tri(A)]
+
+# take lower triangle of behavioral RDM and model RDM, then correlate them 
+# Find out how well the behavioral representational structure matches the model structure. 
+obs_rho <- cor(lower_tri(rdm_beh), lower_tri(model_rdm),
+               method = "spearman", use = "complete.obs")
+
+# we get a single value, rho = 0.693 
+# this shows that the model does seem to correlate moderately with behavioral 
+
+# We don't yet have a significance value. We just have have that single estimate, but it could be due to chance 
+# A permutation test where we intentionally scramble the combinations of the model RDM will allow us to create a null distribution and to compare against it - is this correlation value statistically significant. 
+
+# Now we'll run the permutation test 
+# Shuffle stimulus labels in one RDM many times (e.g., 5000).
+# Recompute correlations each time 
+# See where the observed ρ = 0.693 falls relative to this null distribution.
+# This gives us a valid p-value. 
+
+B <- 5000 # shuffle this many times; each shuffle gives one “null” correlation value
+rhos <- replicate(B, { # replicate runs the block B times and returns a vector of B results
+  perm <- sample(1:n_stim) # n_stim = number of stimuli; this shuffles 1..n_stim (no replacement)
+  # perm is now a random reordering of stimulus indices
+  rdm_perm <- rdm_beh[perm, perm] # permute BOTH rows and columns of the behavioral RDM
+  # model_rdm stays unshuffled; this breaks the alignment between behavior and model
+  cor(lower_tri(rdm_perm), lower_tri(model_rdm),
+      method = "spearman", use = "complete.obs")
+})
+
+# now we have a vector called rhos - a vector of 5000 null correlations   
+p_val <- mean(abs(rhos) >= abs(obs_rho))
+
+cat(sprintf("Behavioral RSA (Spearman) = %.3f, permutation p = %.4f\n", obs_rho, p_val))
+
+
+```
+
+```{r}
+ 
+# Requires: ggplot2, viridisLite (or viridis)
+library(ggplot2)
+library(viridisLite)
+
+# Assume you already have: rdm_beh, model_rdm, cats
+# 1) Order items by category for block structure
+ord <- order(cats)
+cats_ord <- cats[ord]
+rdm_beh_ord   <- rdm_beh[ord, ord]
+model_rdm_ord <- model_rdm[ord, ord]
+
+# 2) Short labels (optional)
+short_names <- sprintf("%s_%02d",
+                       as.numeric(factor(cats_ord)),
+                       ave(seq_along(cats_ord), cats_ord, FUN = seq_along))
+rownames(rdm_beh_ord)   <- colnames(rdm_beh_ord)   <- short_names
+rownames(model_rdm_ord) <- colnames(model_rdm_ord) <- short_names
+
+# 3) Convert matrices to long data frames for ggplot
+to_long <- function(M, name = "value"){
+  df <- as.data.frame(M, check.names = FALSE)
+  df$row <- rownames(M)
+  long <- tidyr::pivot_longer(df, -row, names_to = "col", values_to = name)
+  long$row <- factor(long$row, levels = rev(rownames(M)))  # reverse for top-left origin
+  long$col <- factor(long$col, levels = colnames(M))
+  long
+}
+
+beh_long   <- to_long(rdm_beh_ord,   "d")
+model_long <- to_long(model_rdm_ord, "d")
+
+# 4) Optional: use the SAME color scale for both plots, based on behavioral RDM range
+#    (Behavioral has more gradation; model is still 0/1 but will use same palette.)
+zlim_all <- range(beh_long$d, na.rm = TRUE)
+
+# 5) Compute category block boundaries (in factor index space)
+bounds <- cumsum(table(cats_ord))
+grid_lines <- bounds[-length(bounds)] + 0.5
+
+# 6) A helper to draw the classic “RDM heatmap” with category lines
+geom_block_lines <- function(M){
+  list(
+    lapply(grid_lines, function(g) geom_vline(xintercept = g, size = 0.3)),
+    lapply(grid_lines, function(g) geom_hline(yintercept = length(M) - g + 1, size = 0.3))
+  )
+}
+
+plot_rdm_gg <- function(long_df, title, zmin = zlim_all[1], zmax = zlim_all[2]){
+  ggplot(long_df, aes(x = col, y = row, fill = d)) +
+    geom_tile() +
+    scale_fill_viridis_c(limits = c(zmin, zmax), option = "C") +
+    coord_equal() +
+    labs(title = title, x = NULL, y = NULL, fill = "Dissimilarity") +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6),
+      axis.text.y = element_text(size = 6),
+      panel.grid = element_blank(),
+      plot.title = element_text(face = "bold")
+    )
+}
+
+p_beh   <- plot_rdm_gg(beh_long,   "Behavioral RDM")
+p_model <- plot_rdm_gg(model_long, "Model RDM (Category)")
+
+# add thin block lines
+p_beh   + geom_block_lines(rdm_beh_ord)
+p_model + geom_block_lines(model_rdm_ord)
+
+```
+
+# RSA with many models 
+
+Now lets compare different models to see which model best fits the data. This time lets assume that fruits and tools will be rated more similarly, given that they are inanimate objects, while predators are animate.
+
+-   **Category model (`model_cat`)**
+
+    -   Hypothesis: *all within-category pairs are similar (0), all between-category pairs are dissimilar (1).*
+
+    -   This doesn’t care *which* categories are involved, only same vs. different.
+
+    **Animacy model (`model_anim`)**
+
+    -   Hypothesis: *Fruits + Tools are inanimate (same group, 0); Predators are animate (different from inanimate, 1).*
+
+    -   This collapses your 3 categories into a 2-way split (inanimate vs. animate).
+
+    **Graded model (`model_grad`)**
+
+    Hypothesis: *within-category = 0; Fruits vs. Tools = moderately dissimilar (0.5); anything vs. Predators = maximally dissimilar (1).*
+
+    -   This encodes a richer idea: Fruits and Tools are different, but still “closer” to each other (due to being inanimate) than Predator vs anything since predator is the animate category.
+
+```{r}
+
+# Create 3 model RDMs 
+
+# --- CATEGORY model (within=0, between=1)
+model_cat <- outer(cats, cats, function(a,b) as.numeric(a != b))
+dimnames(model_cat) <- dimnames(rdm_beh)
+
+# --- GRADED ANIMACY model: within=0; Fruits<->Tools=0.5; anything<->Predators=1
+graded_rule <- function(a,b){
+  if (a == b) return(0)
+  if ((a %in% c("Fruits","Tools")) && (b %in% c("Fruits","Tools"))) return(0.5)
+  return(1)
+}
+model_grad <- outer(cats, cats, Vectorize(graded_rule))
+dimnames(model_grad) <- dimnames(rdm_beh)
+
+```
+
+## Multiple Regression RSA
+
+Using spearman correlation as the distance measure.
+
+```{r}
+
+# --- Graded model - inanimate objects are more similar to each other (0.5) than animate predators(1), but they not the same. Same = 0 
+graded_rule <- function(a,b){
+  if (a == b) return(0)                                        # within = 0
+  if ((a %in% c("Fruits","Tools")) && (b %in% c("Fruits","Tools"))) return(0.5)  # Fruit<->Tool = 0.5
+  return(1)                                                    # vs Predator = 1
+}
+model_grad <- outer(cats, cats, Vectorize(graded_rule))
+dimnames(model_grad) <- dimnames(rdm_beh)
+
+# Sanity check: counts of 0 / 0.5 / 1 in the lower triangle
+table(model_grad[lower.tri(model_grad)])
+
+```
+
+```{r}
+
+# Category baseline
+model_cat <- outer(cats, cats, function(a,b) as.numeric(a != b))
+dimnames(model_cat) <- dimnames(rdm_beh)
+
+# Vectorize and rank (Spearman MR-RSA)
+lt_idx <- lower.tri(rdm_beh)
+rank1  <- function(v) rank(v, ties.method = "average")
+
+y_r    <- rank1(rdm_beh[lt_idx])
+cat_r  <- rank1(model_cat[lt_idx])
+grad_r <- rank1(model_grad[lt_idx])
+
+df <- data.frame(y = y_r, cat = cat_r, grad = grad_r)
+
+fit <- lm(y ~ cat + grad, data = df)
+summary(fit)  # expect β_cat > 0; β_grad > 0 if graded (0<0.5<1) matches behavior
+
+# How much unique variance each predictor explains beyond the other:
+r2_full      <- summary(lm(y_r ~ cat_r + grad_r))$r.squared
+r2_drop_cat  <- summary(lm(y_r ~ grad_r))$r.squared
+r2_drop_grad <- summary(lm(y_r ~ cat_r))$r.squared
+uniqR2 <- c(cat = r2_full - r2_drop_cat,
+            grad = r2_full - r2_drop_grad)
+uniqR2
+```
+
+## Other Distance Metrics 
+
+```{r}
+
+
+
+
+```
+
+## Data Driven RSA 
+
+```{r}
+
+
+
+```
